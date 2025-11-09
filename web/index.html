@@ -468,19 +468,46 @@
             addLoadingMessage();
 
             try {
+                const controller = new AbortController();
+                const timeoutId = setTimeout(() => controller.abort(), 120000);
+                
                 const response = await fetch(`${API_URL}/recommend`, {
                     method: 'POST',
                     headers: {
                         'Content-Type': 'application/json',
                     },
-                    body: JSON.stringify({ query: query })
+                    body: JSON.stringify({ query: query }),
+                    signal: controller.signal
                 });
 
+                clearTimeout(timeoutId);
                 removeLoadingMessage();
 
                 if (!response.ok) {
-                    const errorData = await response.json();
-                    throw new Error(errorData.detail || 'Failed to get recommendations');
+                    let errorMessage = 'Backend is sleeping, please try again after refreshing browser to wake it up';
+                    
+                    if (response.status >= 500) {
+                        errorMessage = 'Backend is sleeping, please try again after refreshing browser to wake it up';
+                    } else if (response.status === 400) {
+                        try {
+                            const errorData = await response.json();
+                            errorMessage = errorData.detail || 'Invalid request. Please check your query.';
+                        } catch {
+                            errorMessage = 'Invalid request. Please check your query.';
+                        }
+                    } else {
+                        try {
+                            const errorData = await response.json();
+                            errorMessage = errorData.detail || 'Failed to get recommendations';
+                        } catch {
+                            errorMessage = 'Failed to get recommendations';
+                        }
+                    }
+                    
+                    const errorDiv = addMessage('');
+                    errorDiv.classList.add('error-message');
+                    errorDiv.querySelector('.message-content').innerHTML = errorMessage;
+                    return;
                 }
 
                 const data = await response.json();
@@ -500,7 +527,21 @@
 
             } catch (err) {
                 removeLoadingMessage();
-                addMessage(`Error: ${err.message}`);
+                let errorMessage = 'Backend is sleeping, please try again after refreshing browser to wake it up';
+                
+                if (err.name === 'AbortError') {
+                    errorMessage = 'Request timed out. Backend is sleeping, please try again after refreshing browser to wake it up';
+                } else if (err.message && (err.message.includes('Failed to fetch') || err.message.includes('NetworkError') || err.message.includes('network'))) {
+                    errorMessage = 'Backend is sleeping, please try again after refreshing browser to wake it up';
+                } else if (err.message && (err.message.toLowerCase().includes('neo4j') || err.message.toLowerCase().includes('database'))) {
+                    errorMessage = 'Backend is sleeping, please try again after refreshing browser to wake it up';
+                } else if (err.message) {
+                    errorMessage = `Backend is sleeping, please try again after refreshing browser to wake it up`;
+                }
+                
+                const errorDiv = addMessage('');
+                errorDiv.classList.add('error-message');
+                errorDiv.querySelector('.message-content').innerHTML = errorMessage;
             } finally {
                 sendButton.disabled = false;
                 input.disabled = false;

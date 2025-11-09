@@ -437,11 +437,6 @@ cd api
 uvicorn app:app --reload --port 8000
 ```
 
-**Deploy to Render:**
-1. Connect GitHub repository
-2. Set build command: `pip install -r requirements.txt`
-3. Set start command: `cd api && uvicorn app:app --host 0.0.0.0 --port $PORT`
-4. Add environment variables from `.env`
 
 **API Endpoints:**
 - `GET /health` - Health check endpoint
@@ -450,6 +445,9 @@ uvicorn app:app --reload --port 8000
 ### Web Frontend
 
 The web frontend is a single-page application. Update the `API_URL` in `web/index.html` with your deployed API URL, then deploy to Vercel, Netlify, or GitHub Pages.
+
+Demo:
+![Demo](image.png)
 
 ### Generate Predictions CSV
 
