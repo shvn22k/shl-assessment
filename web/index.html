@@ -468,6 +468,7 @@
             addLoadingMessage();
 
             try {
+                console.log('Sending request to:', `${API_URL}/recommend`);
                 const controller = new AbortController();
                 const timeoutId = setTimeout(() => controller.abort(), 120000);
                 
@@ -478,6 +479,9 @@
                     },
                     body: JSON.stringify({ query: query }),
                     signal: controller.signal
+                }).catch(fetchError => {
+                    console.error('Fetch error:', fetchError);
+                    throw fetchError;
                 });
 
                 clearTimeout(timeoutId);
@@ -504,9 +508,8 @@
                         }
                     }
                     
-                    const errorDiv = addMessage('');
+                    const errorDiv = addMessage(errorMessage);
                     errorDiv.classList.add('error-message');
-                    errorDiv.querySelector('.message-content').innerHTML = errorMessage;
                     return;
                 }
 
@@ -526,22 +529,24 @@
                 }
 
             } catch (err) {
+                console.error('Error caught:', err);
+                console.error('Error name:', err.name);
+                console.error('Error message:', err.message);
                 removeLoadingMessage();
                 let errorMessage = 'Backend is sleeping, please try again after refreshing browser to wake it up';
                 
                 if (err.name === 'AbortError') {
                     errorMessage = 'Request timed out. Backend is sleeping, please try again after refreshing browser to wake it up';
-                } else if (err.message && (err.message.includes('Failed to fetch') || err.message.includes('NetworkError') || err.message.includes('network'))) {
+                } else if (err.name === 'TypeError' || (err.message && (err.message.includes('Failed to fetch') || err.message.includes('NetworkError') || err.message.includes('network') || err.message.includes('CORS')))) {
                     errorMessage = 'Backend is sleeping, please try again after refreshing browser to wake it up';
                 } else if (err.message && (err.message.toLowerCase().includes('neo4j') || err.message.toLowerCase().includes('database'))) {
                     errorMessage = 'Backend is sleeping, please try again after refreshing browser to wake it up';
-                } else if (err.message) {
-                    errorMessage = `Backend is sleeping, please try again after refreshing browser to wake it up`;
+                } else {
+                    errorMessage = 'Backend is sleeping, please try again after refreshing browser to wake it up';
                 }
                 
-                const errorDiv = addMessage('');
+                const errorDiv = addMessage(errorMessage);
                 errorDiv.classList.add('error-message');
-                errorDiv.querySelector('.message-content').innerHTML = errorMessage;
             } finally {
                 sendButton.disabled = false;
                 input.disabled = false;
