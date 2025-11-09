@@ -1,5 +1,6 @@
 import re
 
+# keyword lists for classification
 TECHNICAL_KEYWORDS = [
     "java", "python", "sql", "javascript", "coding", "programming", "developer",
     "engineer", "technical", "software", "automation", "selenium", "testing",
@@ -28,11 +29,13 @@ ADMIN_CLERICAL_KEYWORDS = [
 def classify_query_type(query, entities):
     query_lower = query.lower()
     
+    # count keywords
     tech_count = sum(1 for kw in TECHNICAL_KEYWORDS if kw in query_lower)
     behavioral_count = sum(1 for kw in BEHAVIORAL_KEYWORDS if kw in query_lower)
     leadership_count = sum(1 for kw in LEADERSHIP_KEYWORDS if kw in query_lower)
     admin_count = sum(1 for kw in ADMIN_CLERICAL_KEYWORDS if kw in query_lower)
     
+    # boost from role
     if entities.get('role'):
         role_lower = entities['role'].lower()
         if any(kw in role_lower for kw in TECHNICAL_KEYWORDS):
@@ -42,6 +45,7 @@ def classify_query_type(query, entities):
         if any(kw in role_lower for kw in ADMIN_CLERICAL_KEYWORDS):
             admin_count += 2
     
+    # boost from skills
     if entities.get('skills'):
         for skill in entities['skills']:
             skill_lower = skill.lower()
@@ -59,10 +63,12 @@ def classify_query_type(query, entities):
     if max_count == 0:
         return 'multi_domain'
     
-    non_zero_types = [k for k, v in counts.items() if v > 0]
-    if len(non_zero_types) >= 2 and max_count >= 2:
+    # check if multi-domain
+    non_zero = [k for k, v in counts.items() if v > 0]
+    if len(non_zero) >= 2 and max_count >= 2:
         return 'multi_domain'
     
+    # return highest
     for qtype, count in counts.items():
         if count == max_count:
             return qtype

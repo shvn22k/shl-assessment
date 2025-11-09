@@ -9,14 +9,21 @@ def build_tfidf_index(docs):
 def tfidf_scores(vec, X, query_text):
     qv = vec.transform([query_text])
     sims = (qv @ X.T).toarray()[0]
+    # normalize
     if sims.max() > 0:
         sims = (sims - sims.min()) / (sims.max() - sims.min() + 1e-12)
     return sims
 
 def fuse_scores(embed_scores, tfidf_scores, w_embed=0.65, w_tfidf=0.35):
-    e, t = np.array(embed_scores), np.array(tfidf_scores)
+    e = np.array(embed_scores)
+    t = np.array(tfidf_scores)
+    
+    # normalize both
     if e.max() > 0:
         e = (e - e.min()) / (e.max() - e.min() + 1e-12)
     if t.max() > 0:
         t = (t - t.min()) / (t.max() - t.min() + 1e-12)
-    return (w_embed * e + w_tfidf * t).tolist()
+    
+    # combine
+    fused = w_embed * e + w_tfidf * t
+    return fused.tolist()

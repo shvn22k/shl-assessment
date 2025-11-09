@@ -7,7 +7,7 @@ from functools import lru_cache
 from openai import OpenAI
 from neo4j import GraphDatabase
 from pinecone import Pinecone
-from dotenv import load_dotenv, dotenv_values
+from dotenv import load_dotenv
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
@@ -18,20 +18,34 @@ from query_classifier import classify_query_type, get_fusion_weights
 from query_expansion import expand_query_for_role
 from confidence_scorer import add_confidence_and_explanations
 
-env_vars = dotenv_values(".env")
-load_dotenv(".env", override=True)
+# load .env file
+env_path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), ".env")
+load_dotenv(env_path, override=True)
 
-openai_api_key = env_vars.get("OPENAI_API_KEY") or os.getenv("OPENAI_API_KEY")
-pinecone_api_key = env_vars.get("PINECONE_API_KEY") or os.getenv("PINECONE_API_KEY")
-neo4j_uri = env_vars.get("NEO4J_URI") or os.getenv("NEO4J_URI")
-neo4j_user = env_vars.get("NEO4J_USER") or os.getenv("NEO4J_USER")
-neo4j_password = env_vars.get("NEO4J_PASSWORD") or os.getenv("NEO4J_PASSWORD")
-pinecone_index_name = env_vars.get("PINECONE_INDEX_NAME") or os.getenv("PINECONE_INDEX_NAME", "shl-assessment")
+openai_api_key = os.getenv("OPENAI_API_KEY")
+pinecone_api_key = os.getenv("PINECONE_API_KEY")
+neo4j_uri = os.getenv("NEO4J_URI")
+neo4j_user = os.getenv("NEO4J_USER")
+neo4j_password = os.getenv("NEO4J_PASSWORD")
+pinecone_index_name = os.getenv("PINECONE_INDEX_NAME", "shl-assessment")
 
 client = OpenAI(api_key=openai_api_key)
-neo4j_driver = GraphDatabase.driver(neo4j_uri, auth=(neo4j_user, neo4j_password))
 pinecone = Pinecone(api_key=pinecone_api_key)
 index = pinecone.Index(pinecone_index_name)
+
+neo4j_driver = None
+
+def get_neo4j_driver():
+    global neo4j_driver
+    if neo4j_driver is None:
+        if not neo4j_uri or not neo4j_user or not neo4j_password:
+            return None
+        try:
+            neo4j_driver = GraphDatabase.driver(neo4j_uri, auth=(neo4j_user, neo4j_password))
+        except Exception as e:
+            print(f"Warning: Could not connect to Neo4j: {e}")
+            return None
+    return neo4j_driver
 
 training_data = None
 
@@ -48,7 +62,7 @@ def load_training_data():
             url = row["Assessment_url"]
             training_data[query].append(url)
         return training_data
-    except:
+    except Exception:
         return {}
 
 @lru_cache(maxsize=1)
@@ -65,16 +79,23 @@ def find_similar_queries(query, num_examples=3):
     queries, vectors = get_training_embeddings()
     if not queries:
         return []
+    
+    # embed query
     emb_data = client.embeddings.create(model="text-embedding-3-small", input=[query]).data
     query_emb = emb_data[0].embedding
 
+    # cosine similarity helper
     def cosine(a, b):
-        return sum(x * y for x, y in zip(a, b)) / (
-            (sum(x * x for x in a) ** 0.5) * (sum(y * y for y in b) ** 0.5)
-        )
+        dot = sum(x * y for x, y in zip(a, b))
+        norm_a = (sum(x * x for x in a) ** 0.5)
+        norm_b = (sum(y * y for y in b) ** 0.5)
+        return dot / (norm_a * norm_b) if (norm_a * norm_b) > 0 else 0
 
+    # compute similarities
     sims = [(queries[i], cosine(query_emb, vectors[i])) for i in range(len(queries))]
     sims.sort(key=lambda x: x[1], reverse=True)
+    
+    # get examples
     training = load_training_data()
     examples = []
     for train_query, _ in sims[:num_examples]:
@@ -253,8 +274,10 @@ def expand_query(query):
     return query
 
 def hybrid_chat(query, top_k=10, return_results=False, quiet=False):
+    # extract entities
     entities = extract_entities_from_query(query)
     
+    # classify and get weights
     query_type = classify_query_type(query, entities)
     fusion_weights = get_fusion_weights(query_type)
     
@@ -263,6 +286,7 @@ def hybrid_chat(query, top_k=10, return_results=False, quiet=False):
               f"Neo4j={fusion_weights['neo4j']:.2f}, TF-IDF={fusion_weights['tfidf']:.2f}]")
 
     original_query = query
+    # expand query
     query = expand_query_for_role(query, entities, expansion_weight=0.6)
     
     role_boost_map = {
@@ -280,18 +304,24 @@ def hybrid_chat(query, top_k=10, return_results=False, quiet=False):
         if role in query.lower():
             query += " " + " ".join(words)
 
-    tech_query = expand_query(query + " " + " ".join(entities.get("skills", [])))
+    # build queries
+    skills_text = " " + " ".join(entities.get("skills", [])) if entities.get("skills") else ""
+    tech_query = expand_query(query + skills_text)
     behavioral_query = query + " communication teamwork interpersonal leadership collaboration behavior personality"
 
+    # get embeddings
     tech_emb = client.embeddings.create(model="text-embedding-3-small", input=tech_query).data[0].embedding
     beh_emb = client.embeddings.create(model="text-embedding-3-small", input=behavioral_query).data[0].embedding
 
+    # query pinecone
     tech_results = index.query(vector=tech_emb, top_k=50, include_metadata=True)['matches']
     beh_results = index.query(vector=beh_emb, top_k=50, include_metadata=True)['matches']
 
+    # merge results
     intent_weights = {"technical": 0.6, "behavioral": 0.4}
     merged_results = {}
     
+    # process tech results
     for match in tech_results:
         name = match['metadata'].get('name')
         if name:
@@ -301,10 +331,12 @@ def hybrid_chat(query, top_k=10, return_results=False, quiet=False):
             merged_results[name]['embed_score'] = base_score * fusion_weights['pinecone']
             merged_results[name]['pinecone_score'] = match['score'] * fusion_weights['pinecone']
     
+    # process behavioral results
     for match in beh_results:
         name = match['metadata'].get('name')
         if name:
             if name in merged_results:
+                # combine scores
                 base_score = match['score'] * intent_weights['behavioral']
                 merged_results[name]['score'] += base_score * fusion_weights['pinecone']
                 merged_results[name]['embed_score'] += base_score * fusion_weights['pinecone']
@@ -318,6 +350,7 @@ def hybrid_chat(query, top_k=10, return_results=False, quiet=False):
 
     all_results = list(merged_results.values())
 
+    # tf-idf reranking
     desc_to_result_idx = []
     descriptions = []
     for i, result in enumerate(all_results):
@@ -329,18 +362,22 @@ def hybrid_chat(query, top_k=10, return_results=False, quiet=False):
     if descriptions:
         vec, X = build_tfidf_index(descriptions)
         
+        # get description embeddings
         desc_embs = client.embeddings.create(model="text-embedding-3-small", input=descriptions).data
         embed_scores = []
         for desc_emb in desc_embs:
             sim = cosine_sim(tech_emb, desc_emb.embedding)
             embed_scores.append(sim)
         
+        # tf-idf scores
         query_text = tech_query + " " + behavioral_query
         tfidf_sims = tfidf_scores(vec, X, query_text)
         
+        # fuse
         w_embed = 1.0 - fusion_weights['tfidf']
         fused = fuse_scores(embed_scores, tfidf_sims, w_embed=w_embed, w_tfidf=fusion_weights['tfidf'])
         
+        # apply to results
         for idx, result_idx in enumerate(desc_to_result_idx):
             result = all_results[result_idx]
             fused_score = fused[idx] * fusion_weights['tfidf'] * 0.45
@@ -348,6 +385,7 @@ def hybrid_chat(query, top_k=10, return_results=False, quiet=False):
             result['desc_embed_score'] = embed_scores[idx]
             result['tfidf_score'] = tfidf_sims[idx] * fusion_weights['tfidf']
 
+    # neo4j enrichment
     top_names = [r.get('name') for r in all_results[:20] if r.get('name')]
     neo4j_added_count = 0
     existing_test_types = set()
@@ -357,84 +395,90 @@ def hybrid_chat(query, top_k=10, return_results=False, quiet=False):
             tts = [t.strip() for t in tts.split(',')]
         existing_test_types.update(str(tt).lower() for tt in tts)
     
-    with neo4j_driver.session() as session:
-        if top_names:
-            neo_data = session.run("""
-                MATCH (a:Assessment)
-                WHERE a.name IN $names
-                OPTIONAL MATCH (a)-[:IS_OF_TYPE]->(tt:TestType)
-                RETURN a.name AS name,
-                       a.link AS link,
-                       a.description AS description,
-                       a.duration AS duration,
-                       a.job_levels AS job_levels,
-                       collect(tt.name) AS test_types
-            """, names=top_names).data()
+    driver = get_neo4j_driver()
+    if driver:
+        with driver.session() as session:
+            if top_names:
+                neo_data = session.run("""
+                    MATCH (a:Assessment)
+                    WHERE a.name IN $names
+                    OPTIONAL MATCH (a)-[:IS_OF_TYPE]->(tt:TestType)
+                    RETURN a.name AS name,
+                           a.link AS link,
+                           a.description AS description,
+                           a.duration AS duration,
+                           a.job_levels AS job_levels,
+                           collect(tt.name) AS test_types
+                """, names=top_names).data()
 
-            neo_lookup = {r['name']: r for r in neo_data}
-            for r in all_results:
-                if r.get('name') in neo_lookup:
-                    neo_info = neo_lookup[r['name']]
-                    r['link'] = neo_info.get('link', r.get('link'))
-                    r['description'] = neo_info.get('description', r.get('description'))
-                    r['duration'] = neo_info.get('duration', r.get('duration'))
-                    r['job_levels'] = neo_info.get('job_levels', r.get('job_levels'))
-                    r['test_types'] = neo_info.get('test_types', r.get('test_types', []))
-                    test_types = neo_info.get('test_types', [])
-                    base_boost = 0.1 * len(test_types)
-                    boost_val = base_boost * fusion_weights['neo4j']
-                    r['score'] += boost_val
-                    r['neo_boost'] = boost_val
-                    r['neo4j_score'] = boost_val
-        
-        if entities.get('test_types') or entities.get('job_levels'):
-            neo_fallback = []
-            if entities.get('test_types'):
-                for ttype in entities['test_types']:
-                    data = session.run("""
-                        MATCH (a:Assessment)-[:IS_OF_TYPE]->(t:TestType)
-                        WHERE t.name = $ttype
-                        OPTIONAL MATCH (a)-[:IS_OF_TYPE]->(tt:TestType)
-                        RETURN a.name AS name, a.link AS link, a.description AS description,
-                               a.duration AS duration, a.job_levels AS job_levels,
-                               collect(tt.name) AS test_types
-                        LIMIT 10
-                    """, ttype=ttype).data()
-                    neo_fallback.extend(data)
+                neo_lookup = {r['name']: r for r in neo_data}
+                for r in all_results:
+                    if r.get('name') in neo_lookup:
+                        neo_info = neo_lookup[r['name']]
+                        r['link'] = neo_info.get('link', r.get('link'))
+                        r['description'] = neo_info.get('description', r.get('description'))
+                        r['duration'] = neo_info.get('duration', r.get('duration'))
+                        r['job_levels'] = neo_info.get('job_levels', r.get('job_levels'))
+                        r['test_types'] = neo_info.get('test_types', r.get('test_types', []))
+                        test_types = neo_info.get('test_types', [])
+                        base_boost = 0.1 * len(test_types)
+                        boost_val = base_boost * fusion_weights['neo4j']
+                        r['score'] += boost_val
+                        r['neo_boost'] = boost_val
+                        r['neo4j_score'] = boost_val
             
-            for n in neo_fallback:
-                name = n.get('name')
-                if name and name not in merged_results:
-                    new_tts = set(str(tt).lower() for tt in n.get('test_types', []))
-                    if not existing_test_types.issuperset(new_tts):
-                        base_score = 0.08
-                        n['score'] = base_score * fusion_weights['neo4j']
-                        n['neo_boost'] = base_score * fusion_weights['neo4j']
-                        n['neo4j_score'] = base_score * fusion_weights['neo4j']
-                        n['remote_support'] = 'No'
-                        n['adaptive_support'] = 'No'
-                        merged_results[name] = n
-                        all_results.append(n)
-                        neo4j_added_count += 1
-                        existing_test_types.update(new_tts)
+            if entities.get('test_types') or entities.get('job_levels'):
+                neo_fallback = []
+                if entities.get('test_types'):
+                    for ttype in entities['test_types']:
+                        data = session.run("""
+                            MATCH (a:Assessment)-[:IS_OF_TYPE]->(t:TestType)
+                            WHERE t.name = $ttype
+                            OPTIONAL MATCH (a)-[:IS_OF_TYPE]->(tt:TestType)
+                            RETURN a.name AS name, a.link AS link, a.description AS description,
+                                   a.duration AS duration, a.job_levels AS job_levels,
+                                   collect(tt.name) AS test_types
+                            LIMIT 10
+                        """, ttype=ttype).data()
+                        neo_fallback.extend(data)
+                
+                for n in neo_fallback:
+                    name = n.get('name')
+                    if name and name not in merged_results:
+                        new_tts = set(str(tt).lower() for tt in n.get('test_types', []))
+                        if not existing_test_types.issuperset(new_tts):
+                            base_score = 0.08
+                            n['score'] = base_score * fusion_weights['neo4j']
+                            n['neo_boost'] = base_score * fusion_weights['neo4j']
+                            n['neo4j_score'] = base_score * fusion_weights['neo4j']
+                            n['remote_support'] = 'No'
+                            n['adaptive_support'] = 'No'
+                            merged_results[name] = n
+                            all_results.append(n)
+                            neo4j_added_count += 1
+                            existing_test_types.update(new_tts)
 
     if not quiet and neo4j_added_count > 0:
         print(f"  [Debug] Neo4j fallback added {neo4j_added_count} new assessments")
 
+    # entity-based boosting
     for result in all_results:
         boost = 0.0
         name = result.get('name', '').lower()
         desc = result.get('description', '').lower()
         link = result.get('link', '').lower()
 
+        # skill matches
         for s in entities.get('skills', []):
             if s.lower() in name or s.lower() in desc or s.lower() in link:
                 boost += 0.15
 
+        # domain matches
         for d in entities.get('domain', []):
             if d.lower() in name or d.lower() in desc:
                 boost += 0.1
 
+        # test type matches
         result_test_types = result.get('test_types', [])
         if isinstance(result_test_types, str):
             result_test_types = [t.strip() for t in result_test_types.split(',')]
@@ -442,6 +486,7 @@ def hybrid_chat(query, top_k=10, return_results=False, quiet=False):
             if tf.lower() in ' '.join(str(tt) for tt in result_test_types).lower():
                 boost += 0.3
 
+        # duration match
         if entities.get('duration') and result.get('duration'):
             try:
                 if abs(int(result.get('duration')) - int(entities['duration'])) <= 10:
@@ -453,6 +498,7 @@ def hybrid_chat(query, top_k=10, return_results=False, quiet=False):
         result['score'] += boost
         result['boost'] = boost
 
+    # exact match rescue
     MAX_ADDITIONAL_BOOST = 0.45
     training = load_training_data()
     expected_training_paths = set()
@@ -462,6 +508,7 @@ def hybrid_chat(query, top_k=10, return_results=False, quiet=False):
             if path:
                 expected_training_paths.add(path)
     else:
+        # try similar queries
         similar_queries = find_similar_queries(query, num_examples=3)
         for ex in similar_queries:
             train_query = ex.get('query')
@@ -471,6 +518,7 @@ def hybrid_chat(query, top_k=10, return_results=False, quiet=False):
                     if path:
                         expected_training_paths.add(path)
     
+    # apply rescue boost
     for r in all_results:
         item_path = canonical_path(r.get('link') or r.get('url', ''))
         rescue_boost = 0.0
@@ -483,8 +531,10 @@ def hybrid_chat(query, top_k=10, return_results=False, quiet=False):
             r['score'] += min(rescue_boost, MAX_ADDITIONAL_BOOST)
             r['rescue_boost'] = min(rescue_boost, MAX_ADDITIONAL_BOOST)
 
+    # sort by score
     all_results.sort(key=lambda x: x.get('score', 0), reverse=True)
 
+    # diversity reranking
     final_results = []
     seen_types = set()
     for res in all_results:
@@ -495,6 +545,7 @@ def hybrid_chat(query, top_k=10, return_results=False, quiet=False):
         if len(final_results) >= top_k:
             break
 
+    # add confidence scores
     final_results = add_confidence_and_explanations(final_results, original_query, entities)
 
     if not quiet:

@@ -419,6 +419,48 @@ Edit `src/hybrid_rag.py` → `extract_entities_from_query()` function
 
 ---
 
+## 🚀 Deployment
+
+### API Deployment
+
+The API is ready for deployment to Render, Railway, Google Cloud Run, or AWS Lambda.
+
+**Local Development:**
+```bash
+# Install dependencies
+pip install -r requirements.txt
+
+# Set environment variables in .env file
+
+# Run locally
+cd api
+uvicorn app:app --reload --port 8000
+```
+
+**Deploy to Render:**
+1. Connect GitHub repository
+2. Set build command: `pip install -r requirements.txt`
+3. Set start command: `cd api && uvicorn app:app --host 0.0.0.0 --port $PORT`
+4. Add environment variables from `.env`
+
+**API Endpoints:**
+- `GET /health` - Health check endpoint
+- `POST /recommend` - Get assessment recommendations
+
+### Web Frontend
+
+The web frontend is a single-page application. Update the `API_URL` in `web/index.html` with your deployed API URL, then deploy to Vercel, Netlify, or GitHub Pages.
+
+### Generate Predictions CSV
+
+```bash
+python scripts/generate_predictions.py
+```
+
+Defaults to `data/testdata.xlsx` or specify with `--test-file` option.
+
+---
+
 ## 📝 License
 
 See LICENSE file for details.
